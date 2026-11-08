@@ -48,7 +48,7 @@ async function dbDelete(store, key) {
 const DEFAULT_SETTINGS = {
   newPerDay: 5,          // 1日の新しい単語数
   maxReviews: 50,        // 1日の復習の上限
-  direction: 'mix',      // en2ja | ja2en | mix
+  mode: 'recall',        // recall（英単語を見て思い出す） | listen（音声だけを聞いて思い出す）
   autoplay: true,        // 英単語の音声を自動再生
   introNew: true,        // 新しい単語は先にカードで確認してからテスト
   myFirst: true,         // 自分で追加した単語を優先
@@ -66,11 +66,16 @@ async function saveMeta() {
 function newSrs() { return { state: 'new', due: null, interval: 0, ease: 2.5, reps: 0, lapses: 0, last: null }; }
 
 // ================= 間隔反復（SRS） =================
-// result: 'again'（間違い/まぐれ） | 'good' | 'easy'
+// result: 'again'（忘れた） | 'hard'（あいまい） | 'good'（覚えてた） | 'easy'
+// 次に出す間隔の目安: 覚えてた 1日→3日→約8日→約20日… ／ あいまい 1日→2日→少しずつ伸びる ／ 忘れた 翌日からやり直し
 function schedule(w, result) {
   const s = w.srs, t = today();
   if (result === 'again') {
     s.lapses++; s.reps = 0; s.ease = Math.max(1.3, s.ease - 0.2); s.interval = 1;
+  } else if (result === 'hard') {
+    s.reps++;
+    s.interval = s.reps === 1 ? 1 : s.reps === 2 ? 2 : Math.round(s.interval * 1.2);
+    s.ease = Math.max(1.3, s.ease - 0.15);
   } else {
     s.reps++;
     if (s.reps === 1) s.interval = result === 'easy' ? 3 : 1;
@@ -220,7 +225,7 @@ function renderHome() {
           ? h('button', { class: 'btn primary big', onclick: () => startSession(due, news) }, `スタート（${total}問）`)
           : h('div', { class: 'muted', style: 'text-align:center' },
               all.length ? '今日の分は終わりました 🎉' : 'まだ単語がありません。「追加」か「設定 → TOEFLデータ取り込み」から登録してください。')),
-      (log.new + log.reviews) ? h('p', { class: 'small muted', style: 'margin:10px 0 0' }, `今日の成績：${log.correct} / ${log.new + log.reviews} 問正解`) : null,
+      (log.new + log.reviews) ? h('p', { class: 'small muted', style: 'margin:10px 0 0' }, `今日の成績：${log.new + log.reviews}語中 ${log.correct}語 思い出せた`) : null,
       (!total && all.length && eligible().some(w => w.srs.state === 'new'))
         ? h('div', { style: 'margin-top:10px' }, h('button', { class: 'btn big', onclick: () => { const more = eligible().filter(w => w.srs.state === 'new').sort(newOrder).slice(0, state.settings.newPerDay); startSession([], more); } }, `もう${state.settings.newPerDay}語やる`))
         : null),
@@ -243,72 +248,49 @@ function startSession(due, news) {
   state.session = { items, pos: 0, done: new Set(), firstResult: {}, correct: 0, answered: 0, total: due.length + news.length };
   go('session');
 }
-function pickDirection() {
-  const d = state.settings.direction;
-  return d === 'mix' ? (Math.random() < 0.5 ? 'en2ja' : 'ja2en') : d;
-}
-function distractors(w, dir, n = 3) {
-  const key = dir === 'en2ja' ? 'meaning' : 'word';
-  const seen = new Set([norm(w[key])]);
-  const out = [];
-  // 同じ品詞の単語を優先して選ぶ（品詞で答えが分からないように）
-  const pool = shuffle(state.words).sort((a, b) => (b.pos === w.pos) - (a.pos === w.pos));
-  for (const o of pool) {
-    if (out.length >= n) break;
-    const v = o[key];
-    if (!v || !o.meaning || seen.has(norm(v))) continue;
-    seen.add(norm(v)); out.push(v);
-  }
-  return out;
-}
 function renderSession() {
   const s = state.session;
   if (!s) return go('home');
   if (s.pos >= s.items.length) return renderSessionEnd();
   const item = s.items[s.pos], w = item.w;
+  const intros = s.items.filter(i => i.type === 'intro');
   setTitle(item.type === 'intro'
-    ? `新しい単語 ${s.items.filter(i => i.type === 'intro').indexOf(item) + 1} / ${s.items.filter(i => i.type === 'intro').length}`
-    : `テスト ${Math.min(s.done.size + 1, s.total)} / ${s.total}`);
+    ? `📖 学習 ${intros.indexOf(item) + 1} / ${intros.length}`
+    : `✏️ テスト ${Math.min(s.done.size + 1, s.total)} / ${s.total}`);
   const v = view();
   v.append(
     h('div', { class: 'progress' }, h('div', { style: `width:${(s.done.size / Math.max(1, s.total)) * 100}%` })),
   );
   if (item.type === 'intro') {
     v.append(
-      h('div', { class: 'card' },
-        h('div', { class: 'prompt' }, h('div', { class: 'tag' }, '新しい単語'), h('div', { class: 'word' }, w.word)),
+      h('div', { class: 'card study' },
+        h('div', { class: 'mode-banner study' }, '📖 学習 — テストの前に覚えましょう'),
+        h('div', { class: 'prompt' }, h('div', { class: 'word' }, w.word)),
         detailBlock(w, false),
         h('div', { class: 'grade one' }, h('button', { class: 'btn primary big', onclick: next }, '覚えた → 次へ'))),
       quitButton());
     if (state.settings.autoplay) play(w, 'word');
     return;
   }
-  const dir = pickDirection();
-  const correct = dir === 'en2ja' ? w.meaning : w.word;
-  const options = shuffle([correct, ...distractors(w, dir)]);
-  const choiceBox = h('div', { class: 'choices' });
-  const after = h('div');
-  const prompt = dir === 'en2ja'
-    ? h('div', { class: 'prompt' }, h('div', { class: 'tag' }, '意味は？'), h('div', { class: 'word' }, w.word), h('div', { style: 'margin-top:8px' }, speakBtn(w, 'word', '発音')))
-    : h('div', { class: 'prompt' }, h('div', { class: 'tag' }, '英単語は？'), h('div', { class: 'meaning-q' }, w.pos ? h('span', { class: 'pos' }, w.pos) : null, w.meaning));
-  let answered = false;
-  const answer = (picked, btn) => {
-    if (answered) return; answered = true;
-    const ok = picked === correct;
-    [...choiceBox.children].forEach(b => { if (b.dataset.v === correct) b.classList.add('correct'); });
-    if (btn && !ok) btn.classList.add('wrong');
-    const first = !s.done.has(w.id) && !(w.id in s.firstResult);
-    after.append(
-      h('div', { class: 'result ' + (ok ? 'ok' : 'ng') }, ok ? '○ 正解' : '× 不正解'),
-      detailBlock(w, true),
-      gradeButtons(w, ok, first));
-    if (dir === 'ja2en' || state.settings.autoplay) play(w, 'word');
-    after.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  };
-  options.forEach(o => choiceBox.append(h('button', { class: 'choice', 'data-v': o, onclick: e => answer(o, e.currentTarget) }, o)));
-  choiceBox.append(h('button', { class: 'choice', style: 'text-align:center;color:var(--muted)', onclick: () => answer(null, null) }, 'わからない'));
-  v.append(h('div', { class: 'card' }, prompt, choiceBox, after), quitButton());
-  if (dir === 'en2ja' && state.settings.autoplay) play(w, 'word');
+
+  // テスト：答え（意味）を隠したまま出題し、思い出してから「答えを見る」で確認する
+  const listen = state.settings.mode === 'listen';
+  const first = !s.done.has(w.id) && !(w.id in s.firstResult);
+  const answerBox = h('div');
+  const prompt = h('div', { class: 'prompt' },
+    h('div', { class: 'tag' }, listen ? '聞いて、意味を思い出してください' : '意味を思い出してください'),
+    listen
+      ? h('button', { class: 'listen-btn', onclick: () => play(w, 'word') }, '🔊', h('div', { class: 'small' }, 'もう一度聞く'))
+      : h('div', {}, h('div', { class: 'word' }, w.word), h('div', { style: 'margin-top:8px' }, speakBtn(w, 'word', '発音'))));
+  const reveal = h('button', { class: 'btn primary big', onclick: () => {
+    reveal.remove();
+    answerBox.append(detailBlock(w, true), gradeButtons(w, first));
+    answerBox.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } }, '答えを見る');
+  v.append(
+    h('div', { class: 'card' }, h('div', { class: 'mode-banner test' }, '✏️ テスト'), prompt, reveal, answerBox),
+    quitButton());
+  if (listen || state.settings.autoplay) play(w, 'word');
 }
 function detailBlock(w, showWord) {
   return h('div', { class: 'detail card', style: 'margin:12px 0 0;background:var(--bg)' },
@@ -320,7 +302,7 @@ function detailBlock(w, showWord) {
     w.note ? h('div', { class: 'small muted', style: 'margin-top:6px' }, '📝 ' + w.note) : null,
     h('div', { class: 'row', style: 'margin-top:10px' }, speakBtn(w, 'word', '単語'), w.example || (w.audio && w.audio.example) ? speakBtn(w, 'example', '例文') : null));
 }
-function gradeButtons(w, ok, first) {
+function gradeButtons(w, first) {
   const s = state.session;
   const finish = async result => {
     if (first) {
@@ -341,12 +323,12 @@ function gradeButtons(w, ok, first) {
     }
     next();
   };
-  if (!ok) return h('div', { class: 'grade one' }, h('button', { class: 'btn primary big', onclick: () => finish('again') }, '次へ（あとでもう一度）'));
-  if (!first) return h('div', { class: 'grade one' }, h('button', { class: 'btn primary big', onclick: () => finish('good') }, '次へ'));
-  return h('div', { class: 'grade' },
-    h('button', { class: 'btn', onclick: () => finish('again') }, 'まぐれ'),
-    h('button', { class: 'btn primary', onclick: () => finish('good') }, 'OK'),
-    h('button', { class: 'btn', onclick: () => finish('easy') }, '簡単'));
+  return h('div', {},
+    h('div', { class: 'small muted', style: 'text-align:center;margin-top:12px' }, '思い出せましたか？'),
+    h('div', { class: 'grade', style: 'margin-top:6px' },
+      h('button', { class: 'btn grade-ng', onclick: () => finish('again') }, '忘れた'),
+      h('button', { class: 'btn grade-mid', onclick: () => finish('hard') }, 'あいまい'),
+      h('button', { class: 'btn primary', onclick: () => finish('good') }, '覚えてた')));
 }
 function next() { state.session.pos++; go('session'); }
 function quitButton() {
@@ -359,9 +341,9 @@ function renderSessionEnd() {
   const uniq = [...new Map(missed.map(w => [w.id, w])).values()];
   view().append(h('div', { class: 'card', style: 'text-align:center' },
     h('div', { style: 'font-size:44px' }, '🎉'),
-    h('h2', {}, `${s.answered}問中 ${s.correct}問 正解`),
+    h('h2', {}, `${s.answered}語中 ${s.correct}語 思い出せた`),
     uniq.length ? h('div', { style: 'text-align:left;margin-top:10px' },
-      h('div', { class: 'small muted' }, '明日もう一度出る単語'),
+      h('div', { class: 'small muted' }, '忘れていた単語（明日もう一度出ます）'),
       h('ul', { class: 'list' }, uniq.map(w => h('li', {}, h('div', {}, h('div', { class: 'lw' }, w.word), h('div', { class: 'lm' }, w.meaning)), speakBtn(w, 'word', ''))))) : null,
     h('button', { class: 'btn primary big', style: 'margin-top:14px', onclick: () => { state.session = null; go('home'); } }, 'ホームへ')));
 }
@@ -546,11 +528,11 @@ function renderSettings() {
       h('h2', {}, 'テストの設定'),
       h('label', { class: 'field' }, '1日の新しい単語数', numInput('newPerDay', 0, 100)),
       h('label', { class: 'field' }, '1日の復習の上限', numInput('maxReviews', 5, 500)),
-      h('label', { class: 'field' }, '出題の向き',
-        h('select', { onchange: e => set('direction', e.target.value) },
-          [['mix', 'ミックス'], ['en2ja', '英語 → 意味'], ['ja2en', '意味 → 英語']].map(([v, l]) => h('option', { value: v, selected: st.direction === v }, l)))),
+      h('label', { class: 'field' }, '出題方法',
+        h('select', { onchange: e => set('mode', e.target.value) },
+          [['recall', '思い出し（英単語と発音を見て意味を思い出す）'], ['listen', '聞き取り（音声だけで意味を思い出す）']].map(([v, l]) => h('option', { value: v, selected: st.mode === v }, l)))),
       check('英単語の音声を自動再生', 'autoplay'),
-      check('新しい単語は先にカードで確認する', 'introNew'),
+      check('新しい単語はテストの前に学習カードで覚える', 'introNew'),
       check('My単語を優先して出す', 'myFirst'),
       deckCheck('toefl'), deckCheck('my')),
     h('div', { class: 'card' },
