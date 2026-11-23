@@ -188,14 +188,22 @@ function go(tab, arg) {
 
 // ================= ホーム =================
 function eligible() { return state.words.filter(w => state.settings.decks[w.deck] !== false && w.word && w.meaning); }
+// 新しい単語は本の並び（No.順）ではなく、ばらばらの順に出す。
+// 順番は単語ごとに固定なので、途中でやめても次回は同じ単語の続きから始まる
+function randomKey(id) {
+  let x = 2166136261;
+  for (let i = 0; i < id.length; i++) x = Math.imul(x ^ id.charCodeAt(i), 16777619);
+  x = Math.imul(x ^ (x >>> 16), 0x85ebca6b);
+  x = Math.imul(x ^ (x >>> 13), 0xc2b2ae35);
+  return (x ^ (x >>> 16)) >>> 0;
+}
 function newOrder(a, b) {
   if (state.settings.myFirst && a.deck !== b.deck) return a.deck === 'my' ? -1 : 1;
-  if (a.deck === 'toefl' && b.deck === 'toefl') return (a.no || 0) - (b.no || 0);
-  return (a.createdAt || 0) - (b.createdAt || 0);
+  return randomKey(String(a.id)) - randomKey(String(b.id));
 }
 function todaysWork() {
   const t = today(), pool = eligible(), log = dayLog(t);
-  const due = pool.filter(w => w.srs.state !== 'new' && w.srs.due <= t).sort((a, b) => a.srs.due - b.srs.due).slice(0, state.settings.maxReviews);
+  const due = pool.filter(w => w.srs.state !== 'new' && w.srs.due <= t).sort((a, b) => a.srs.due - b.srs.due || randomKey(String(a.id)) - randomKey(String(b.id))).slice(0, state.settings.maxReviews);
   const remain = Math.max(0, state.settings.newPerDay - log.new);
   const news = pool.filter(w => w.srs.state === 'new').sort(newOrder).slice(0, remain);
   return { due, news };

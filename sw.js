@@ -1,5 +1,5 @@
 // オフラインで動かすためのサービスワーカー（アプリ本体だけをキャッシュ）
-const CACHE = 'vocab-drill-v2';
+const CACHE = 'vocab-drill-v3';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
